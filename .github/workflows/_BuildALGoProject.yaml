@@ -166,6 +166,36 @@ jobs:
           projectDependenciesJson: ${{ inputs.projectDependenciesJson }}
           baselineWorkflowRunId: ${{ inputs.baselineWorkflowRunId }}
 
+      - name: Set app version offset
+        if: steps.DetermineBuildProject.outputs.BuildIt == 'True'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $offset = 6000
+          $project = "${{ inputs.project }}"
+          $appJsonPath = Join-Path $project "app/app.json"
+
+          if (!(Test-Path $appJsonPath)) {
+            throw "app.json not found at $appJsonPath"
+          }
+
+          $app = Get-Content $appJsonPath -Raw | ConvertFrom-Json
+          $version = $app.version.Split('.')
+
+          $major = [int]$version[0]
+          $minor = [int]$version[1]
+          $build = [int]$env:GITHUB_RUN_NUMBER + $offset
+
+          $app.version = "$major.$minor.$build.0"
+
+          $app | ConvertTo-Json -Depth 100 | Set-Content $appJsonPath -Encoding UTF8
+
+          Write-Host "Project: $project"
+          Write-Host "GitHub Run Number: $env:GITHUB_RUN_NUMBER"
+          Write-Host "Offset: $offset"
+          Write-Host "Version set to $($app.version)"
+
       - name: Compile Apps
         id: compile
         uses: microsoft/AL-Go-Actions/CompileApps@v9.0
