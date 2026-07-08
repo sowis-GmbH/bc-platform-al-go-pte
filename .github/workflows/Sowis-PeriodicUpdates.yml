@@ -34,7 +34,7 @@ jobs:
           $settingsPath = Join-Path $env:GITHUB_WORKSPACE '.AL-Go/settings.json'
           if (Test-Path $settingsPath) {
             $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
-            if ($settings.PSObject.Properties.Name -contains 'tegosPeriodicUpdatesEnabled') {
+            if ($settings.PSObject.Properties.Name -contains 'sowisPeriodicUpdatesEnabled') {
               $enabled = [bool]$settings.tegosPeriodicUpdatesEnabled
             }
           }
