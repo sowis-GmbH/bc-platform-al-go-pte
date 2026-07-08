@@ -1,0 +1,199 @@
+name: "Sowis Auto Create Release"
+
+on:
+  workflow_run:
+    workflows: [" CI/CD"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  auto-release:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      (
+        github.event.workflow_run.head_branch == 'main' ||
+        startsWith(github.event.workflow_run.head_branch, 'release/')
+      )
+    runs-on: ubuntu-latest-m
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Read deployment metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          $manifest = Get-Content ".deployment/manifest.json" -Raw | ConvertFrom-Json
+          $deployment = Get-Content ".deployment/deployment.json" -Raw | ConvertFrom-Json
+
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "releaseName=$($manifest.releaseName)"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "bcMajor=$($manifest.bcMajor)"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "deploymentType=$($deployment.deploymentType)"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "createReleaseHubEntry=$($deployment.createReleaseHubEntry)"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "createConsultantBundle=$($deployment.createConsultantBundle)"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "uploadConsultantBundle=$($deployment.uploadConsultantBundle)"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: release-artifacts
+          merge-multiple: false
+
+      - name: Resolve release values
+        id: release
+        shell: pwsh
+        run: |
+          $branchName = "${{ github.event.workflow_run.head_branch }}"
+          $releaseName = "${{ steps.metadata.outputs.releaseName }}"
+
+          $appArtifactDir = Get-ChildItem -Path "release-artifacts" -Directory |
+            Where-Object { $_.Name -match "-Apps-(?<version>\d+\.\d+\.\d+\.\d+)$" } |
+            Select-Object -First 1
+
+          if (!$appArtifactDir) {
+            throw "No AL-Go app artifact found."
+          }
+
+          $artifactVersion = [regex]::Match($appArtifactDir.Name, "-Apps-(\d+\.\d+\.\d+\.\d+)$").Groups[1].Value
+          $bcMajor = "${{ steps.metadata.outputs.bcMajor }}"
+
+          $parts = $artifactVersion.Split(".")
+          $appVersion = "$bcMajor.$($parts[1]).$($parts[2]).$($parts[3])"
+
+          $semverTag = $appVersion -replace "\.0$", ""
+
+          if ($branchName -eq "main" -or $branchName -eq "master") {
+            $packageType = "Release"
+            $releaseFolder = "releases"
+            $tag = $semverTag
+            $prerelease = "false"
+          }
+          elseif ($branchName -like "release/*") {
+            $packageType = "Release Candidate"
+            $releaseFolder = "release-candidates"
+            $tag = "$semverTag-rc"
+            $prerelease = "true"
+          }
+          else {
+            Write-Host "No release for branch: $branchName"
+            exit 0
+          }
+
+          $title = "$releaseName $packageType $appVersion"
+
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "artifactVersion=$artifactVersion"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "appVersion=$appVersion"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "title=$title"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "prerelease=$prerelease"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "packageType=$packageType"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "releaseFolder=$releaseFolder"
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $out = "release-assets"
+
+          if (Test-Path $out) {
+            Remove-Item $out -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+          $artifactVersion = "${{ steps.release.outputs.artifactVersion }}"
+
+          $assetDirs = Get-ChildItem -Path "release-artifacts" -Directory |
+            Where-Object {
+              $_.Name -match "-Apps-$artifactVersion$" -or
+              $_.Name -match "-ConsultantBundle-$artifactVersion$"
+            }
+
+          foreach ($dir in $assetDirs) {
+            $zipPath = Join-Path $out "$($dir.Name).zip"
+
+            Compress-Archive `
+              -Path (Join-Path $dir.FullName "*") `
+              -DestinationPath $zipPath `
+              -Force
+          }
+
+      - name: Create GitHub release
+        id: githubRelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.release.outputs.tag }}"
+          $title = "${{ steps.release.outputs.title }}"
+          $isPrerelease = "${{ steps.release.outputs.prerelease }}"
+
+          $assets = Get-ChildItem -Path "release-assets" -Filter "*.zip" | ForEach-Object {
+            $_.FullName
+          }
+
+          if (-not $assets -or $assets.Count -eq 0) {
+            throw "No release assets found."
+          }
+
+          gh release delete $tag `
+            --repo "${{ github.repository }}" `
+            --yes `
+            --cleanup-tag `
+            --quiet 2>$null
+
+          $args = @("release", "create", $tag)
+          $args += $assets
+          $args += @(
+            "--repo", "${{ github.repository }}",
+            "--title", $title,
+            "--notes", "Automatisch erzeugter Release aus AL-Go Build.",
+            "--target", "${{ github.event.workflow_run.head_sha }}"
+          )
+
+          if ($isPrerelease -eq "true") {
+            $args += "--prerelease"
+          }
+
+          gh @args
+
+          $releaseUrl = gh release view $tag --repo "${{ github.repository }}" --json url --jq ".url"
+          Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "releaseUrl=$releaseUrl"
+
+      - name: Call BC Platform Automation
+        if: steps.metadata.outputs.createReleaseHubEntry == 'True'
+        shell: pwsh
+        run: |
+          $payload = @{
+            source = "github-auto-release"
+            repository = "${{ github.repository }}"
+            owner = "${{ github.repository_owner }}"
+            repo = "${{ github.event.repository.name }}"
+            releaseName = "${{ steps.metadata.outputs.releaseName }}"
+            bcMajor = [int]"${{ steps.metadata.outputs.bcMajor }}"
+            deploymentType = "${{ steps.metadata.outputs.deploymentType }}"
+            version = "${{ steps.release.outputs.appVersion }}"
+            tagName = "${{ steps.release.outputs.tag }}"
+            releaseType = "${{ steps.release.outputs.packageType }}"
+            releaseUrl = "${{ steps.githubRelease.outputs.releaseUrl }}"
+            releaseDate = "$(Get-Date -Format yyyy-MM-dd)"
+            bundleUrl = "${{ steps.githubRelease.outputs.releaseUrl }}"
+          } | ConvertTo-Json -Depth 20
+
+          $headers = @{
+              "x-bc-platform-secret" = "${{ secrets.BC_PLATFORM_AUTOMATION_SECRET }}"
+          }
+
+          Invoke-RestMethod `
+              -Method Post `
+              -Uri "${{ secrets.BC_PLATFORM_AUTOMATION_URL }}/api/release" `
+              -Headers $headers `
+              -ContentType "application/json" `
+              -Body $payload
