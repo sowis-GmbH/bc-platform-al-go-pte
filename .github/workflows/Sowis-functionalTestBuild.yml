@@ -4,179 +4,166 @@ on:
   workflow_dispatch:
     inputs:
       testIssueNumber:
-        description: 'GitHub issue number of the functional test'
+        description: 'Test issue number'
         required: true
         type: string
 
       requestCommentId:
-        description: 'ID of the /build command comment'
+        description: 'Request comment ID'
         required: true
         type: string
 
       statusCommentId:
-        description: 'ID of the status comment'
+        description: 'Status comment ID'
         required: true
         type: string
 
       requestedByLogin:
-        description: 'GitHub login that requested the build'
+        description: 'Requesting GitHub user'
         required: true
         type: string
 
       correlationId:
-        description: 'Unique ID of the functional test build'
+        description: 'Unique build correlation ID'
         required: true
         type: string
 
       baseBranch:
-        description: 'Base branch for the temporary build'
+        description: 'Base branch'
         required: true
-        default: 'main'
         type: string
 
       developmentsJson:
-        description: 'Resolved development issues and branches as JSON'
+        description: 'Resolved development branches'
         required: true
         type: string
 
 permissions:
-  contents: read
-  actions: read
-
-defaults:
-  run:
-    shell: powershell
+  contents: write
 
 jobs:
-  ValidateRequest:
-    name: Validate functional test build request
-    runs-on: windows-latest
+  prepare-functional-test-branch:
+    name: Prepare functional test branch
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Display request information
-        env:
-          TEST_ISSUE_NUMBER: ${{ inputs.testIssueNumber }}
-          REQUEST_COMMENT_ID: ${{ inputs.requestCommentId }}
-          STATUS_COMMENT_ID: ${{ inputs.statusCommentId }}
-          REQUESTED_BY_LOGIN: ${{ inputs.requestedByLogin }}
-          CORRELATION_ID: ${{ inputs.correlationId }}
-          BASE_BRANCH: ${{ inputs.baseBranch }}
-          DEVELOPMENTS_JSON: ${{ inputs.developmentsJson }}
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.baseBranch }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
-          Set-StrictMode -Version 3.0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          Write-Host "Sowis Functional Test Build"
-          Write-Host "---------------------------"
-          Write-Host "Test issue:       #$env:TEST_ISSUE_NUMBER"
-          Write-Host "Request comment:  $env:REQUEST_COMMENT_ID"
-          Write-Host "Status comment:   $env:STATUS_COMMENT_ID"
-          Write-Host "Requested by:     @$env:REQUESTED_BY_LOGIN"
-          Write-Host "Correlation ID:   $env:CORRELATION_ID"
-          Write-Host "Base branch:      $env:BASE_BRANCH"
-          Write-Host ""
-          Write-Host "Developments JSON:"
-          Write-Host $env:DEVELOPMENTS_JSON
-
-      - name: Validate scalar inputs
-        env:
-          TEST_ISSUE_NUMBER: ${{ inputs.testIssueNumber }}
-          REQUEST_COMMENT_ID: ${{ inputs.requestCommentId }}
-          STATUS_COMMENT_ID: ${{ inputs.statusCommentId }}
-          REQUESTED_BY_LOGIN: ${{ inputs.requestedByLogin }}
-          CORRELATION_ID: ${{ inputs.correlationId }}
-          BASE_BRANCH: ${{ inputs.baseBranch }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          Set-StrictMode -Version 3.0
-
-          if (-not [int]::TryParse(
-              $env:TEST_ISSUE_NUMBER,
-              [ref]$null
-          )) {
-              throw "testIssueNumber is not a valid integer."
-          }
-
-          if (-not [long]::TryParse(
-              $env:REQUEST_COMMENT_ID,
-              [ref]$null
-          )) {
-              throw "requestCommentId is not a valid integer."
-          }
-
-          if (-not [long]::TryParse(
-              $env:STATUS_COMMENT_ID,
-              [ref]$null
-          )) {
-              throw "statusCommentId is not a valid integer."
-          }
-
-          if ([string]::IsNullOrWhiteSpace(
-              $env:REQUESTED_BY_LOGIN
-          )) {
-              throw "requestedByLogin must not be empty."
-          }
-
-          if ([string]::IsNullOrWhiteSpace(
-              $env:CORRELATION_ID
-          )) {
-              throw "correlationId must not be empty."
-          }
-
-          if ([string]::IsNullOrWhiteSpace(
-              $env:BASE_BRANCH
-          )) {
-              throw "baseBranch must not be empty."
-          }
-
-      - name: Validate developments JSON
+      - name: Validate request
+        shell: bash
         env:
           DEVELOPMENTS_JSON: ${{ inputs.developmentsJson }}
         run: |
-          $ErrorActionPreference = "Stop"
-          Set-StrictMode -Version 3.0
+          set -euo pipefail
 
-          try {
-              $developments =
-                  $env:DEVELOPMENTS_JSON |
-                  ConvertFrom-Json
-          }
-          catch {
-              throw "developmentsJson is not valid JSON: $($_.Exception.Message)"
-          }
+          if [ -z "${{ inputs.testIssueNumber }}" ]; then
+            echo "testIssueNumber is missing."
+            exit 1
+          fi
 
-          $items = @($developments)
+          if [ -z "${{ inputs.correlationId }}" ]; then
+            echo "correlationId is missing."
+            exit 1
+          fi
 
-          if ($items.Count -eq 0) {
-              throw "developmentsJson contains no development issues."
-          }
+          echo "$DEVELOPMENTS_JSON" | jq empty
 
-          foreach ($development in $items) {
-              if (-not $development.issueNumber) {
-                  throw "A development entry has no issueNumber."
-              }
+          DEVELOPMENT_COUNT="$(echo "$DEVELOPMENTS_JSON" | jq 'length')"
 
-              if ([string]::IsNullOrWhiteSpace(
-                  [string]$development.branchName
-              )) {
-                  throw "Development issue #$($development.issueNumber) has no branchName."
-              }
+          if [ "$DEVELOPMENT_COUNT" -eq 0 ]; then
+            echo "No development branches were supplied."
+            exit 1
+          fi
 
-              if ([string]::IsNullOrWhiteSpace(
-                  [string]$development.commitSha
-              )) {
-                  throw "Development issue #$($development.issueNumber) has no commitSha."
-              }
+          echo "Request is valid."
+          echo "Development count: $DEVELOPMENT_COUNT"
 
-              Write-Host (
-                  "Validated development issue #{0}: {1} ({2})" -f
-                  $development.issueNumber,
-                  $development.branchName,
-                  $development.commitSha
-              )
-          }
-
-      - name: Request accepted
+      - name: Create temporary branch
+        id: branch
+        shell: bash
         run: |
-          Write-Host "Functional test build request accepted."
-          Write-Host "The Git merge and AL-Go build will be added in the next step."
+          set -euo pipefail
+
+          SHORT_CORRELATION_ID="$(echo "${{ inputs.correlationId }}" | cut -c1-8)"
+          TEMP_BRANCH="functional-test/${{ inputs.testIssueNumber }}-${SHORT_CORRELATION_ID}"
+
+          echo "Creating temporary branch: $TEMP_BRANCH"
+
+          git switch --create "$TEMP_BRANCH"
+
+          echo "name=$TEMP_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Merge development branches
+        shell: bash
+        env:
+          DEVELOPMENTS_JSON: ${{ inputs.developmentsJson }}
+        run: |
+          set -euo pipefail
+
+          echo "$DEVELOPMENTS_JSON" |
+            jq -r '.[].branchName' |
+            while IFS= read -r DEVELOPMENT_BRANCH; do
+              if [ -z "$DEVELOPMENT_BRANCH" ]; then
+                continue
+              fi
+
+              echo "Fetching branch: $DEVELOPMENT_BRANCH"
+
+              git fetch origin \
+                "$DEVELOPMENT_BRANCH:refs/remotes/origin/$DEVELOPMENT_BRANCH"
+
+              echo "Merging branch: $DEVELOPMENT_BRANCH"
+
+              git merge \
+                --no-ff \
+                --no-edit \
+                "origin/$DEVELOPMENT_BRANCH"
+            done
+
+      - name: Push temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git push \
+            --set-upstream \
+            origin \
+            "${{ steps.branch.outputs.name }}"
+
+      - name: Trigger AL-Go CI/CD
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GHTOKENWORKFLOW }}
+          script: |
+            const branchName = '${{ steps.branch.outputs.name }}';
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'CICD.yaml',
+              ref: branchName
+            });
+
+            core.info(
+              `AL-Go CI/CD was triggered for branch ${branchName}.`
+            );
+
+      - name: Display result
+        shell: bash
+        run: |
+          echo "Functional test branch created successfully."
+          echo "Repository: ${{ github.repository }}"
+          echo "Base branch: ${{ inputs.baseBranch }}"
+          echo "Temporary branch: ${{ steps.branch.outputs.name }}"
+          echo "Test issue: #${{ inputs.testIssueNumber }}"
+          echo "Correlation ID: ${{ inputs.correlationId }}"

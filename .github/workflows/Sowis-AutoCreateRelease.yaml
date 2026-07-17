@@ -15,7 +15,8 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       (
         github.event.workflow_run.head_branch == 'main' ||
-        startsWith(github.event.workflow_run.head_branch, 'release/')
+        startsWith(github.event.workflow_run.head_branch, 'release/') ||
+        startsWith(github.event.workflow_run.head_branch, 'functional-test/')
       )
     runs-on: ubuntu-latest-m
 
@@ -71,20 +72,26 @@ jobs:
           $semverTag = $appVersion -replace "\.0$", ""
 
           if ($branchName -eq "main" -or $branchName -eq "master") {
-            $packageType = "Release"
-            $releaseFolder = "releases"
-            $tag = $semverTag
-            $prerelease = "false"
+              $packageType = "Release"
+              $releaseFolder = "releases"
+              $tag = $semverTag
+              $prerelease = "false"
           }
           elseif ($branchName -like "release/*") {
-            $packageType = "Release Candidate"
-            $releaseFolder = "release-candidates"
-            $tag = "$semverTag-rc"
-            $prerelease = "true"
+              $packageType = "Release Candidate"
+              $releaseFolder = "release-candidates"
+              $tag = "$semverTag-rc"
+              $prerelease = "true"
+          }
+          elseif ($branchName -like "functional-test/*") {
+              $packageType = "Functional Test"
+              $releaseFolder = "functional-tests"
+              $tag = "$semverTag-test-${{ github.event.workflow_run.id }}"
+              $prerelease = "true"
           }
           else {
-            Write-Host "No release for branch: $branchName"
-            exit 0
+              Write-Host "No release for branch: $branchName"
+              exit 0
           }
 
           $title = "$releaseName $packageType $appVersion"
