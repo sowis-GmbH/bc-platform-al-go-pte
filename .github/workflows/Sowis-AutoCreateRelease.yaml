@@ -40,6 +40,71 @@ jobs:
           Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "createConsultantBundle=$($deployment.createConsultantBundle)"
           Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "uploadConsultantBundle=$($deployment.uploadConsultantBundle)"
 
+      - name: Read functional test metadata
+        id: functionalTest
+        if: startsWith(github.event.workflow_run.head_branch, 'functional-test/')
+        shell: pwsh
+        run: |
+          $metadataPath = ".functional-test/request.json"
+
+          if (-not (Test-Path $metadataPath)) {
+            throw "Functional test metadata file '$metadataPath' was not found."
+          }
+
+          $metadata =
+            Get-Content $metadataPath -Raw |
+            ConvertFrom-Json
+
+          if (-not $metadata.testIssueNumber) {
+            throw "Metadata property 'testIssueNumber' is missing."
+          }
+
+          if (-not $metadata.statusCommentId) {
+            throw "Metadata property 'statusCommentId' is missing."
+          }
+
+          if (-not $metadata.correlationId) {
+            throw "Metadata property 'correlationId' is missing."
+          }
+
+          if (-not $metadata.requestedByLogin) {
+            throw "Metadata property 'requestedByLogin' is missing."
+          }
+
+          if (-not $metadata.projectRepository) {
+            throw "Metadata property 'projectRepository' is missing."
+          }
+
+          Add-Content `
+            -Encoding UTF8 `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "testIssueNumber=$($metadata.testIssueNumber)"
+
+          Add-Content `
+            -Encoding UTF8 `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "requestCommentId=$($metadata.requestCommentId)"
+
+          Add-Content `
+            -Encoding UTF8 `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "statusCommentId=$($metadata.statusCommentId)"
+
+          Add-Content `
+            -Encoding UTF8 `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "correlationId=$($metadata.correlationId)"
+
+          Add-Content `
+            -Encoding UTF8 `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "requestedByLogin=$($metadata.requestedByLogin)"
+
+          Add-Content `
+            -Encoding UTF8 `
+            -Path $env:GITHUB_OUTPUT `
+            -Value "projectRepository=$($metadata.projectRepository)"
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -174,6 +239,68 @@ jobs:
           $releaseUrl = gh release view $tag --repo "${{ github.repository }}" --json url --jq ".url"
           Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "releaseUrl=$releaseUrl"
 
+      - name: Report successful functional test build
+        if: startsWith(github.event.workflow_run.head_branch, 'functional-test/')
+        shell: pwsh
+        run: |
+          $workflowRunUrl =
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}"
+
+          $payload = @{
+            status = "success"
+
+            testIssueNumber =
+              [int]"${{ steps.functionalTest.outputs.testIssueNumber }}"
+
+            statusCommentId =
+              [int64]"${{ steps.functionalTest.outputs.statusCommentId }}"
+
+            correlationId =
+              "${{ steps.functionalTest.outputs.correlationId }}"
+
+            requestedByLogin =
+              "${{ steps.functionalTest.outputs.requestedByLogin }}"
+
+            projectRepository =
+              "${{ steps.functionalTest.outputs.projectRepository }}"
+
+            productRepository =
+              "${{ github.repository }}"
+
+            branchName =
+              "${{ github.event.workflow_run.head_branch }}"
+
+            version =
+              "${{ steps.release.outputs.appVersion }}"
+
+            tagName =
+              "${{ steps.release.outputs.tag }}"
+
+            releaseUrl =
+              "${{ steps.githubRelease.outputs.releaseUrl }}"
+
+            bundleUrl =
+              "${{ steps.githubRelease.outputs.releaseUrl }}"
+
+            workflowRunId =
+              [int64]"${{ github.event.workflow_run.id }}"
+
+            workflowRunUrl =
+              $workflowRunUrl
+          } | ConvertTo-Json -Depth 20
+
+          $headers = @{
+            "x-bc-platform-secret" =
+              "${{ secrets.BC_PLATFORM_AUTOMATION_SECRET }}"
+          }
+
+          Invoke-RestMethod `
+            -Method Post `
+            -Uri "${{ secrets.BC_PLATFORM_AUTOMATION_URL }}/api/functional-test-build-result" `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body $payload
+
       - name: Call BC Platform Automation
         if: steps.metadata.outputs.createReleaseHubEntry == 'True'
         shell: pwsh
@@ -204,3 +331,33 @@ jobs:
               -Headers $headers `
               -ContentType "application/json" `
               -Body $payload
+
+      - name: Delete functional test branch
+        if: success() && startsWith(github.event.workflow_run.head_branch, 'functional-test/')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GHTOKENWORKFLOW }}
+          script: |
+            const branchName = context.payload.workflow_run.head_branch;
+
+            if (!branchName) {
+              core.warning("No branch name found.");
+              return;
+            }
+
+            if (!branchName.startsWith("functional-test/")) {
+              core.info(
+                `Skipping branch deletion. '${branchName}' is not a functional test branch.`
+              );
+              return;
+            }
+
+            core.info(`Deleting branch '${branchName}'...`);
+
+            await github.rest.git.deleteRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `heads/${branchName}`
+            });
+
+            core.info(`Branch '${branchName}' deleted successfully.`);

@@ -130,6 +130,43 @@ jobs:
                 "origin/$DEVELOPMENT_BRANCH"
             done
 
+      - name: Write functional test metadata
+        shell: pwsh
+        run: |
+          $metadataDirectory = ".functional-test"
+          $metadataFile = Join-Path $metadataDirectory "request.json"
+
+          New-Item `
+            -ItemType Directory `
+            -Path $metadataDirectory `
+            -Force | Out-Null
+
+          $metadata = @{
+            testIssueNumber = [int]"${{ inputs.testIssueNumber }}"
+            requestCommentId = "${{ inputs.requestCommentId }}"
+            statusCommentId = "${{ inputs.statusCommentId }}"
+            requestedByLogin = "${{ inputs.requestedByLogin }}"
+            correlationId = "${{ inputs.correlationId }}"
+            baseBranch = "${{ inputs.baseBranch }}"
+            temporaryBranch = "${{ steps.branch.outputs.name }}"
+            projectRepository = "sowis-GmbH/bc-platform-project-management"
+          }
+
+          $metadata |
+            ConvertTo-Json -Depth 20 |
+            Set-Content `
+              -Path $metadataFile `
+              -Encoding UTF8
+
+          git add $metadataFile
+
+          if (-not (git diff --cached --quiet)) {
+              git commit -m "Add functional test build metadata"
+          }
+          else {
+              Write-Host "No metadata changes to commit."
+          }
+
       - name: Push temporary branch
         shell: bash
         run: |
