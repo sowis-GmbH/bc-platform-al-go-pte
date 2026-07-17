@@ -1,0 +1,182 @@
+name: 'Sowis Functional Test Build'
+
+on:
+  workflow_dispatch:
+    inputs:
+      testIssueNumber:
+        description: 'GitHub issue number of the functional test'
+        required: true
+        type: string
+
+      requestCommentId:
+        description: 'ID of the /build command comment'
+        required: true
+        type: string
+
+      statusCommentId:
+        description: 'ID of the status comment'
+        required: true
+        type: string
+
+      requestedByLogin:
+        description: 'GitHub login that requested the build'
+        required: true
+        type: string
+
+      correlationId:
+        description: 'Unique ID of the functional test build'
+        required: true
+        type: string
+
+      baseBranch:
+        description: 'Base branch for the temporary build'
+        required: true
+        default: 'main'
+        type: string
+
+      developmentsJson:
+        description: 'Resolved development issues and branches as JSON'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  ValidateRequest:
+    name: Validate functional test build request
+    runs-on: windows-latest
+
+    steps:
+      - name: Display request information
+        env:
+          TEST_ISSUE_NUMBER: ${{ inputs.testIssueNumber }}
+          REQUEST_COMMENT_ID: ${{ inputs.requestCommentId }}
+          STATUS_COMMENT_ID: ${{ inputs.statusCommentId }}
+          REQUESTED_BY_LOGIN: ${{ inputs.requestedByLogin }}
+          CORRELATION_ID: ${{ inputs.correlationId }}
+          BASE_BRANCH: ${{ inputs.baseBranch }}
+          DEVELOPMENTS_JSON: ${{ inputs.developmentsJson }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version 3.0
+
+          Write-Host "Sowis Functional Test Build"
+          Write-Host "---------------------------"
+          Write-Host "Test issue:       #$env:TEST_ISSUE_NUMBER"
+          Write-Host "Request comment:  $env:REQUEST_COMMENT_ID"
+          Write-Host "Status comment:   $env:STATUS_COMMENT_ID"
+          Write-Host "Requested by:     @$env:REQUESTED_BY_LOGIN"
+          Write-Host "Correlation ID:   $env:CORRELATION_ID"
+          Write-Host "Base branch:      $env:BASE_BRANCH"
+          Write-Host ""
+          Write-Host "Developments JSON:"
+          Write-Host $env:DEVELOPMENTS_JSON
+
+      - name: Validate scalar inputs
+        env:
+          TEST_ISSUE_NUMBER: ${{ inputs.testIssueNumber }}
+          REQUEST_COMMENT_ID: ${{ inputs.requestCommentId }}
+          STATUS_COMMENT_ID: ${{ inputs.statusCommentId }}
+          REQUESTED_BY_LOGIN: ${{ inputs.requestedByLogin }}
+          CORRELATION_ID: ${{ inputs.correlationId }}
+          BASE_BRANCH: ${{ inputs.baseBranch }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version 3.0
+
+          if (-not [int]::TryParse(
+              $env:TEST_ISSUE_NUMBER,
+              [ref]$null
+          )) {
+              throw "testIssueNumber is not a valid integer."
+          }
+
+          if (-not [long]::TryParse(
+              $env:REQUEST_COMMENT_ID,
+              [ref]$null
+          )) {
+              throw "requestCommentId is not a valid integer."
+          }
+
+          if (-not [long]::TryParse(
+              $env:STATUS_COMMENT_ID,
+              [ref]$null
+          )) {
+              throw "statusCommentId is not a valid integer."
+          }
+
+          if ([string]::IsNullOrWhiteSpace(
+              $env:REQUESTED_BY_LOGIN
+          )) {
+              throw "requestedByLogin must not be empty."
+          }
+
+          if ([string]::IsNullOrWhiteSpace(
+              $env:CORRELATION_ID
+          )) {
+              throw "correlationId must not be empty."
+          }
+
+          if ([string]::IsNullOrWhiteSpace(
+              $env:BASE_BRANCH
+          )) {
+              throw "baseBranch must not be empty."
+          }
+
+      - name: Validate developments JSON
+        env:
+          DEVELOPMENTS_JSON: ${{ inputs.developmentsJson }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version 3.0
+
+          try {
+              $developments =
+                  $env:DEVELOPMENTS_JSON |
+                  ConvertFrom-Json
+          }
+          catch {
+              throw "developmentsJson is not valid JSON: $($_.Exception.Message)"
+          }
+
+          $items = @($developments)
+
+          if ($items.Count -eq 0) {
+              throw "developmentsJson contains no development issues."
+          }
+
+          foreach ($development in $items) {
+              if (-not $development.issueNumber) {
+                  throw "A development entry has no issueNumber."
+              }
+
+              if ([string]::IsNullOrWhiteSpace(
+                  [string]$development.branchName
+              )) {
+                  throw "Development issue #$($development.issueNumber) has no branchName."
+              }
+
+              if ([string]::IsNullOrWhiteSpace(
+                  [string]$development.commitSha
+              )) {
+                  throw "Development issue #$($development.issueNumber) has no commitSha."
+              }
+
+              Write-Host (
+                  "Validated development issue #{0}: {1} ({2})" -f
+                  $development.issueNumber,
+                  $development.branchName,
+                  $development.commitSha
+              )
+          }
+
+      - name: Request accepted
+        run: |
+          Write-Host "Functional test build request accepted."
+          Write-Host "The Git merge and AL-Go build will be added in the next step."
