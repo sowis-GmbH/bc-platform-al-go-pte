@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   actions: read
+  pull-requests: read
 
 jobs:
   auto-release:
@@ -243,6 +244,43 @@ jobs:
         if: startsWith(github.event.workflow_run.head_branch, 'functional-test/')
         shell: pwsh
         run: |
+          $metadataPath = ".functional-test/request.json"
+
+          if (-not (Test-Path $metadataPath)) {
+            throw "Functional test metadata file '$metadataPath' was not found."
+          }
+
+          $metadata =
+            Get-Content $metadataPath -Raw |
+            ConvertFrom-Json
+
+          if (-not $metadata.testIssueNumber) {
+            throw "Metadata property 'testIssueNumber' is missing."
+          }
+
+          if (-not $metadata.statusCommentId) {
+            throw "Metadata property 'statusCommentId' is missing."
+          }
+
+          if (-not $metadata.correlationId) {
+            throw "Metadata property 'correlationId' is missing."
+          }
+
+          if (-not $metadata.requestedByLogin) {
+            throw "Metadata property 'requestedByLogin' is missing."
+          }
+
+          if (-not $metadata.projectRepository) {
+            throw "Metadata property 'projectRepository' is missing."
+          }
+
+          Write-Host "Functional test metadata loaded:"
+          Write-Host "Test issue: $($metadata.testIssueNumber)"
+          Write-Host "Status comment: $($metadata.statusCommentId)"
+          Write-Host "Correlation ID: $($metadata.correlationId)"
+          Write-Host "Requested by: $($metadata.requestedByLogin)"
+          Write-Host "Project repository: $($metadata.projectRepository)"
+
           $workflowRunUrl =
             "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}"
 
@@ -250,19 +288,19 @@ jobs:
             status = "success"
 
             testIssueNumber =
-              [int]"${{ steps.functionalTest.outputs.testIssueNumber }}"
+              [int]$metadata.testIssueNumber
 
             statusCommentId =
-              [int64]"${{ steps.functionalTest.outputs.statusCommentId }}"
+              [int64]$metadata.statusCommentId
 
             correlationId =
-              "${{ steps.functionalTest.outputs.correlationId }}"
+              [string]$metadata.correlationId
 
             requestedByLogin =
-              "${{ steps.functionalTest.outputs.requestedByLogin }}"
+              [string]$metadata.requestedByLogin
 
             projectRepository =
-              "${{ steps.functionalTest.outputs.projectRepository }}"
+              [string]$metadata.projectRepository
 
             productRepository =
               "${{ github.repository }}"
@@ -287,7 +325,13 @@ jobs:
 
             workflowRunUrl =
               $workflowRunUrl
+
+            developmentIssues =
+              @($metadata.developments)
+
           } | ConvertTo-Json -Depth 20
+
+          Write-Host "Sending functional test callback..."
 
           $headers = @{
             "x-bc-platform-secret" =
@@ -297,6 +341,84 @@ jobs:
           Invoke-RestMethod `
             -Method Post `
             -Uri "${{ secrets.BC_PLATFORM_AUTOMATION_URL }}/api/functional-test-build-result" `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body $payload
+
+      - name: Report successful main build
+        if: github.event.workflow_run.head_branch == 'main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $owner =
+            "${{ github.repository_owner }}"
+
+          $repository =
+            "${{ github.event.repository.name }}"
+
+          $commitSha =
+            "${{ github.event.workflow_run.head_sha }}"
+
+          Write-Host "Checking whether commit $commitSha belongs to a merged pull request..."
+
+          $pullRequestsJson =
+            gh api `
+              --method GET `
+              -H "Accept: application/vnd.github+json" `
+              "/repos/$owner/$repository/commits/$commitSha/pulls"
+
+          $pullRequests =
+            @($pullRequestsJson | ConvertFrom-Json)
+
+          $mergedPullRequest =
+            $pullRequests |
+            Where-Object {
+              $_.merged_at -and
+              $_.base.ref -eq "main"
+            } |
+            Select-Object -First 1
+
+          if (-not $mergedPullRequest) {
+            Write-Host "Commit $commitSha does not belong to a merged pull request."
+            Write-Host "Skipping master build result callback."
+            exit 0
+          }
+
+          Write-Host "Merged pull request found: #$($mergedPullRequest.number)"
+          Write-Host "Pull request title: $($mergedPullRequest.title)"
+
+          $payload = @{
+            owner =
+              $owner
+
+            repository =
+              $repository
+
+            commitSha =
+              $commitSha
+
+            pullRequestNumber =
+              [int]$mergedPullRequest.number
+
+            releaseVersion =
+              "${{ steps.release.outputs.tag }}"
+
+            releaseUrl =
+              "${{ steps.githubRelease.outputs.releaseUrl }}"
+
+            downloadUrl =
+              "${{ steps.githubRelease.outputs.releaseUrl }}"
+          } | ConvertTo-Json
+
+          $headers = @{
+            "x-bc-platform-secret" =
+              "${{ secrets.BC_PLATFORM_AUTOMATION_SECRET }}"
+          }
+
+          Invoke-RestMethod `
+            -Method Post `
+            -Uri "${{ secrets.BC_PLATFORM_AUTOMATION_URL }}/api/master-build-result" `
             -Headers $headers `
             -ContentType "application/json" `
             -Body $payload
@@ -319,6 +441,7 @@ jobs:
             releaseUrl = "${{ steps.githubRelease.outputs.releaseUrl }}"
             releaseDate = "$(Get-Date -Format yyyy-MM-dd)"
             bundleUrl = "${{ steps.githubRelease.outputs.releaseUrl }}"
+            headSha = "${{ github.event.workflow_run.head_sha }}"
           } | ConvertTo-Json -Depth 20
 
           $headers = @{
